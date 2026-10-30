@@ -86,12 +86,14 @@ class MainActivity : AppCompatActivity() {
                 HealthConnectProbe.readPermissions() + BACKGROUND_PERM + HISTORY_PERM
             )
         }
-        button("3. Health Connect sweep (30d)") { runSweep(30) }
+        button("3. Health Connect sweep (400d)") { runSweep(400) }
+        button("3b. Health Connect sweep (30d)") { runSweep(30) }
         button("4. Probe history wall (400d)") { runHistoryWall() }
         button("5. Probe changes token") { runChangesToken() }
         button("6. Start background-read probe") { startBackgroundProbe() }
         button("7. Read background-read log") { readBackgroundLog() }
-        button("8. Samsung Data SDK sweep (30d)") { runSamsungSweep(30) }
+        button("8. Samsung Data SDK permissions") { runSamsungPermissions() }
+        button("8b. Samsung Data SDK sweep (400d)") { runSamsungSweep(400) }
         button("9. Write run report") { writeReport() }
 
         setContentView(LinearLayout(this).apply {
@@ -120,10 +122,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun runSweep(days: Long) = lifecycleScope.launch {
         log("--- Health Connect sweep, last $days days ---")
+        log("    (window opens ${java.time.LocalDate.now().minusDays(days)})")
         val reports = withContext(Dispatchers.IO) { hc.sweep(days) { msg -> postLog(msg) } }
         collected += reports
         val withData = reports.count { it.available }
         log("--- done: $withData/${reports.size} types returned data ---")
+        if (withData == 0) {
+            // Distinguish "nothing synced" from "nothing in range" -- they need different fixes.
+            log("    all empty. Either Samsung Health is not connected to Health Connect,")
+            log("    or it only syncs forward from the moment you connect it and never backfills.")
+        }
     }
 
     private fun runHistoryWall() = lifecycleScope.launch {
@@ -132,6 +140,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun runChangesToken() = lifecycleScope.launch {
         collected += withContext(Dispatchers.IO) { hc.probeChangesToken { postLog(it) } }
+    }
+
+    private fun runSamsungPermissions() = lifecycleScope.launch {
+        log("--- Samsung Data SDK: ${samsung.availability()} ---")
+        val granted = runCatching { samsung.requestPermissions(this@MainActivity) }
+            .getOrElse { t ->
+                log("requestPermissions threw ${t::class.simpleName}: ${t.message}")
+                emptySet()
+            }
+        log("Samsung granted ${granted.size} type(s)")
+        granted.sorted().forEach { log("  $it") }
+        if (granted.isEmpty()) {
+            log("Zero granted. Most likely Developer Mode for Data Read is OFF:")
+            log("  Samsung Health > ... > Settings > About Samsung Health")
+            log("  > tap version 10x > Developer mode > Developer Mode for Data Read")
+        }
     }
 
     private fun runSamsungSweep(days: Long) = lifecycleScope.launch {

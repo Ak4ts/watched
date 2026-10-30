@@ -1,8 +1,11 @@
 # Findings — measured on the device
 
-Environment and toolchain are verified. **No probe has run yet**, so no data-type row is
-answered — every row in [capability-matrix.md](capability-matrix.md) is still `unverified`.
-Each claim below cites how it was established.
+Environment, toolchain and **Surfaces A and B are verified on-device**. Surface C (on-watch raw
+sensors) and Surface D (bulk export) are still untested. Each claim cites the run that produced it.
+
+**Headline: Surface B works and recovered 13 months of history.** The Samsung Health Data SDK
+runs on a non-Samsung phone under developer mode and returned real data for 8 of its 16 readable
+types. Health Connect returned nothing, for a diagnosed reason.
 
 ## Environment under test
 
@@ -63,14 +66,108 @@ client version.
 
 ## Run log
 
-| Run | Date | Probe | What it tested | Result |
-|---|---|---|---|---|
-| — | — | — | — | — |
+| Run | Probe | What it tested | Result |
+|---|---|---|---|
+| `20261030-031607` | phone | Health Connect sweep, 29 types, 30d | 0/29 returned data |
+| `20261030-034132` | phone | Samsung Data SDK sweep, 16 types, 400d | **8/16 returned data, 20 MB** |
 
-## Results
+## Surface A — Health Connect: empty, and we know why
 
-_Populated by `tools/` from the probe dumps._
+All 31 permissions were granted (29 record types + background + history, zero denied), the SDK
+reported `SDK_AVAILABLE`, and the sweep completed with no errors. It returned **0 records across
+all 29 types**.
 
-## Open risks still unresolved
+**Root cause, established via `adb`:** Samsung Health holds **31 of 31 Health Connect permissions
+denied** (`granted=false`). It has never been connected, so nothing has ever been written to
+Health Connect. The probe read a genuinely empty store — this is not an API or permission fault
+on our side.
 
-_Carried forward from [access-gates.md](access-gates.md) until closed._
+Secondary finding: the user had not worn the watch recently, so even a working sync would have
+found little in a 30-day window. Both facts had to be separated before the result meant anything.
+
+**Still unanswered:** whether connecting Samsung Health *backfills* history into Health Connect or
+only syncs forward from that moment. Samsung's wording ("when Samsung Health has new or updated
+data, it writes to Health Connect") suggests forward-only. If so, Health Connect is useless for
+historical recovery and only matters for future capture.
+
+## Surface B — Samsung Health Data SDK: works, and it has the history
+
+**Developer mode works on a non-Samsung phone.** This was an open risk (the phone is a
+POCO/Xiaomi, not a Galaxy). Samsung's own service confirmed it in logcat:
+`SHD#PrivilegedHealthService: dev.watched.probe.phone is verified`. All **16 readable types were
+granted**, including the four that exist on no other surface.
+
+### Data recovered (run `20261030-034132`, 400-day window)
+
+| Type | Records | Per-minute samples | Oldest | Newest | Bytes/day of data |
+|---|---:|---:|---|---|---:|
+| `heart_rate` | 3,245 | **12,743** | 2025-09-25 | **2026-10-30** | 6.8 KiB |
+| `floors_climbed` | 258 | — | 2025-09-25 | 2026-01-01 | 1003 B |
+| `exercise` | 135 | — | 2025-09-25 | 2026-01-03 | 144.2 KiB |
+| `sleep` | 45 | — | 2025-09-25 | 2025-12-27 | 4.3 KiB |
+| `blood_oxygen` | 43 | 9,763 | 2025-09-25 | 2025-12-27 | 12.9 KiB |
+| `skin_temperature` | 43 | 12,199 | 2025-09-25 | 2025-12-27 | 16.7 KiB |
+| `energy_score` | 30 | — | 2025-09-25 | 2025-12-19 | 129 B |
+| `user_profile` | 1 | — | — | — | — |
+
+**Empty but permitted** (8): `blood_glucose`, `blood_pressure`, `body_composition`,
+`body_temperature`, `nutrition`, `water_intake`, `sleep_apnea`,
+`irregular_heart_rhythm_notification`. These need hardware events or manual entry that never
+happened — absence of data, not absence of capability.
+
+### `binning_data` is the real resolution
+
+The record count badly understates what is there. Each `heart_rate` record is a **one-hour bucket**
+carrying up to 60 `binning_data` entries at **per-minute** granularity:
+
+```json
+{"startTime":"2025-09-25T06:00:00Z","endTime":"2025-09-25T06:00:59Z",
+ "heartRate":51.0,"min":50.0,"max":52.0}
+```
+
+Same shape for `blood_oxygen` and `skin_temperature`. Not every hour is full — 3,245 hourly
+records hold 12,743 per-minute samples, not 194,700, so the watch was worn intermittently.
+
+### Verified payload shapes
+
+- `sleep`: `sessions[]` with **`stages[]`** (`stage`, `sleepStageOrdinal`, times), plus
+  **`sleep_score`** (e.g. 59) and `sleep_duration` (ISO-8601 `PT6H6M`).
+- `exercise`: `sessions[]` with `calories`, `count`, `countType` (`STRIDE`), `autoDetected`,
+  `altitudeGain/Loss`; top level `exercise_type` (`WALKING`).
+- `energy_score`: `total_score` (float, e.g. 79.88), one per day.
+- `user_profile`: `height`, `weight`, `gender`, `date_of_birth`, `nickname`.
+- Every record carries `_uid`, `_startTime`, `_endTime`, `_updateTime`, `_zoneOffset`,
+  and `dataSource` as `_appId` / `_deviceId`.
+
+### Three undeclared dependencies — the main integration trap
+
+The Samsung AAR ships as a loose file with **no POM**, so none of its transitive dependencies
+resolve. Each one fails at *runtime*, not compile time, as `NoClassDefFoundError`. Scanning the
+extracted bytecode gave the complete list in one pass instead of discovering them one crash at a
+time:
+
+| Package | Status | Symptom if missing |
+|---|---|---|
+| `kotlinx.parcelize` | **must add** | `ReadDataRequest` fails to initialise |
+| `com.google.gson` | **must add** | `PlatformInternalException(code=9003)` on every read |
+| `kotlinx.coroutines` | already present | — |
+
+Both are now wired into `probe-phone/build.gradle.kts` and `probe-watch/build.gradle.kts`.
+
+## Questions answered so far
+
+| # | Question | Answer |
+|---|---|---|
+| 2 | Is HRV reachable? | **Not via Surface A or B.** No HRV constant exists in the SDK (bytecode). Health Connect's `HeartRateVariabilityRmssdRecord` returned nothing. Remaining hopes: the export, or deriving it from raw IBI/PPG. |
+| 4 | Are the Data SDK's exclusive types populated? | **Partly.** `energy_score` yes (30 days), `skin_temperature` yes (12,199 samples), **`sleep_score` yes** (inside sleep sessions). `sleep_apnea` and `irregular_heart_rhythm_notification` empty. |
+| 5 | Can `STEPS` be read? | **No.** `DataType$StepsType` does not implement `Readable` — aggregate-only. Samsung's own permission sample is misleading. |
+| 6 | Do background reads work? | Feature reports `FEATURE_STATUS_AVAILABLE` and the permission was granted. **An actual background read has not yet been confirmed.** |
+| 10 | Which unmapped HC types carry data? | Moot while Health Connect is empty. Re-test after connecting Samsung Health. |
+
+## Still open
+
+1. **Surface C** — `SDK_POLICY_ERROR` smoke test has not run. The watch has not been connected.
+2. **Surface D** — no export taken yet. This is the only remaining candidate source for HRV and stress.
+3. **Health Connect backfill** — does connecting Samsung Health import history, or only sync forward?
+4. **Background reads** — feature available, real unattended read unconfirmed.
+5. **Developer-mode durability** — does it survive reboots and Samsung Health updates?

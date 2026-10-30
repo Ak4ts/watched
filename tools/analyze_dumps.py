@@ -34,11 +34,32 @@ def iso(ms: int | None) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
+RECORD_TIME_KEYS = ("_startTime", "startTime", "time", "start_time")
+
+
+def _record_epoch_ms(payload: dict) -> int | None:
+    """Epoch millis of the record itself, as opposed to when we captured it."""
+    import datetime as dt
+
+    for k in RECORD_TIME_KEYS:
+        v = payload.get(k)
+        if isinstance(v, str):
+            try:
+                return int(dt.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000)
+            except ValueError:
+                continue
+        if isinstance(v, int):
+            return v
+    return None
+
+
 def measure_jsonl(path: Path) -> dict:
     """Independently measure a dump file: count, bytes, and the real payload key set."""
     count = 0
     keys: dict[str, int] = {}
     captured: list[int] = []
+    record_times: list[int] = []
+    binned = 0
     for line in path.open(encoding="utf-8", errors="replace"):
         line = line.strip()
         if not line:
@@ -55,11 +76,21 @@ def measure_jsonl(path: Path) -> dict:
             for k, v in payload.items():
                 if v is not None:
                     keys[k] = keys.get(k, 0) + 1
+            ts = _record_epoch_ms(payload)
+            if ts is not None:
+                record_times.append(ts)
+            # Samsung nests the high-resolution series under binning_data; count it, because
+            # the record count alone badly understates the real resolution.
+            bd = payload.get("binning_data")
+            if isinstance(bd, list):
+                binned += len(bd)
     return {
         "count": count,
         "bytes": path.stat().st_size,
         "keys": keys,
+        "binned": binned,
         "capturedSpanMs": (max(captured) - min(captured)) if len(captured) > 1 else None,
+        "dataSpanMs": (max(record_times) - min(record_times)) if len(record_times) > 1 else None,
     }
 
 
@@ -84,24 +115,27 @@ def analyse_run(run_dir: Path) -> None:
     if not dumps:
         print("_No .jsonl dumps in this run._\n")
     else:
-        print("| Surface | Type | Records | Bytes | Span | Projected/day | Fields seen |")
-        print("|---|---|---:|---:|---|---:|---|")
+        print("| Surface | Type | Records | Binned samples | Bytes | Data span | Bytes/day of data | Fields seen |")
+        print("|---|---|---:|---:|---:|---|---:|---|")
         for path in dumps:
             surface, _, type_name = path.stem.partition(".")
             m = measure_jsonl(path)
-            span = m["capturedSpanMs"]
-            if span and span > 0:
-                per_day = m["bytes"] * 86_400_000 / span
+            span = m["dataSpanMs"]
+            if span and span > 86_400_000:
+                days = span / 86_400_000
+                span_s = f"{days:.0f}d"
+                proj = human_bytes(m["bytes"] / days)
+            elif span and span > 0:
                 span_s = f"{span / 1000:.0f}s"
-                proj = human_bytes(per_day)
+                proj = "—"
             else:
                 span_s, proj = "—", "—"
-            field_list = ", ".join(sorted(m["keys"])[:8]) or "—"
-            if len(m["keys"]) > 8:
-                field_list += f", +{len(m['keys']) - 8} more"
+            field_list = ", ".join(sorted(m["keys"])[:6]) or "—"
+            if len(m["keys"]) > 6:
+                field_list += f", +{len(m['keys']) - 6} more"
             print(
-                f"| {surface} | `{type_name}` | {m['count']} | {human_bytes(m['bytes'])} "
-                f"| {span_s} | {proj} | {field_list} |"
+                f"| {surface} | `{type_name}` | {m['count']} | {m['binned'] or '—'} "
+                f"| {human_bytes(m['bytes'])} | {span_s} | {proj} | {field_list} |"
             )
         print()
 

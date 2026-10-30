@@ -14,6 +14,7 @@ work = "2.10.0"
 wearable = "18.2.0"
 wear = "1.3.0"
 lifecycle = "2.8.7"
+gson = "2.11.0"
 
 [libraries]
 androidx-core-ktx     = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -25,6 +26,8 @@ health-connect        = { module = "androidx.health.connect:connect-client", ver
 androidx-work         = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 play-wearable         = { module = "com.google.android.gms:play-services-wearable", version.ref = "wearable" }
 androidx-wear         = { module = "androidx.wear:wear", version.ref = "wear" }
+kotlin-parcelize-rt   = { module = "org.jetbrains.kotlin:kotlin-parcelize-runtime", version.ref = "kotlin" }
+gson                  = { module = "com.google.code.gson:gson", version.ref = "gson" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

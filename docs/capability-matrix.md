@@ -113,45 +113,76 @@ watch are synchronized immediately." **Measure the real lag per type.**
 
 ## 3. Surface B — Samsung Health Data SDK
 
-Full type list with documented operations. `R` read · `W` insert/update/delete · `A` aggregate ·
-`C` read changes.
+**Status: `verified` — read from the shipped AAR's bytecode with `javap` on 2026-10-30.**
+The SDK's bundled `docs/` folder contains only HTML redirects to the web, so the bytecode is the
+authoritative reference. This table supersedes Samsung's published documentation, which is wrong
+in at least one place (see Steps).
 
-| Data type | Ops | Notes | Status |
-|---|---|---|---|
-| Blood glucose | R W C | | unverified |
-| Blood oxygen | R W C | | unverified |
-| Blood pressure | R W C | | unverified |
-| Body composition | R W C | | unverified |
-| Body temperature | R W C | added v1.0.0 | unverified |
-| **Energy score** | R C | **read-only, B-exclusive** | unverified |
-| Exercise | R W A C | `vo2Max` added v1.0.0 | unverified |
-| Exercise location | — | permission only | unverified |
-| Floors climbed | R W A C | | unverified |
-| Heart rate | R W A C | cadence undocumented | unverified |
-| **Irregular heart rhythm notification** | R C | **read-only, added v1.1.0, B-exclusive** | unverified |
-| Nutrition | R W A C | | unverified |
-| **Skin temperature** | R C | **read-only** | unverified |
-| Sleep | R W A C | + "read associated data"; **sleep score readable, not writable** | unverified |
-| **Sleep apnea** | R C | **read-only, added v1.1.0, B-exclusive** | unverified |
-| Steps | **A only** | docs show no read row — but the permission sample requests `READ`. **Contradiction, probe it.** | unverified |
-| Water intake | R W A C | | unverified |
-| Active calories burned goal | A | | unverified |
-| Active time goal | A | | unverified |
-| Activity summary | A | | unverified |
-| Nutrition goal | A | | unverified |
-| Sleep goal | **A only** | same `READ` contradiction as Steps | unverified |
-| Step goal | A | | unverified |
-| Water intake goal | A | | unverified |
-| User profile | R | sex, DOB, height, weight, nickname | unverified |
+### Readable types (16) — implement `DataType.Readable`
 
-**HRV does not appear anywhere in this list.** The API reference has not been read; if HRV exists
-it is undocumented on the data-types page.
+| `DataTypes` constant | Change-readable | Writable | Read builder |
+|---|:-:|:-:|---|
+| `HEART_RATE` | yes | yes | DualTime |
+| `SLEEP` | yes | yes | DualTime |
+| `BLOOD_OXYGEN` | yes | yes | DualTime |
+| `BLOOD_GLUCOSE` | yes | yes | DualTime |
+| `BLOOD_PRESSURE` | yes | yes | DualTime |
+| `BODY_COMPOSITION` | yes | yes | DualTime |
+| `BODY_TEMPERATURE` | yes | yes | DualTime |
+| `EXERCISE` | yes | yes | DualTime |
+| `FLOORS_CLIMBED` | yes | yes | DualTime |
+| `NUTRITION` | yes | yes | DualTime |
+| `WATER_INTAKE` | yes | yes | DualTime |
+| **`ENERGY_SCORE`** | yes | **no** | **LocalDate** |
+| **`SKIN_TEMPERATURE`** | yes | **no** | DualTime |
+| **`SLEEP_APNEA`** | yes | **no** | DualTime |
+| **`IRREGULAR_HEART_RHYTHM_NOTIFICATION`** | yes | **no** | DualTime |
+| `USER_PROFILE` | no | no | **UserProfile (no filter)** |
 
-Field-level schemas (what a sleep or heart-rate record actually contains, sample granularity,
-whether series data is exposed) are **not documented on the pages read**. The probe must discover
-them by dumping records.
+### Aggregate-only types (9) — do NOT implement `Readable`
 
----
+`STEPS` · `STEPS_GOAL` · `SLEEP_GOAL` · `ACTIVITY_SUMMARY` · `ACTIVE_TIME_GOAL` ·
+`ACTIVE_CALORIES_BURNED_GOAL` · `NUTRITION_GOAL` · `WATER_INTAKE_GOAL` · `EXERCISE_LOCATION`
+
+### Resolved contradictions
+
+- **Steps is genuinely aggregate-only.** `DataType$StepsType` extends `DataType` and implements
+  nothing else — no `Readable`, no builder, only a `TOTAL` aggregate operation. Samsung's own
+  permission sample requesting `Permission.of(DataTypes.STEPS, AccessType.READ)` is misleading.
+  Same for `SLEEP_GOAL`. **Question 5 answered: cannot read Steps, only aggregate it.**
+- **HRV does not exist in this SDK.** There is no HRV constant in `DataTypes` and no HRV type
+  class in the AAR. Not undocumented — absent. **Question 2 partially answered: Surface B is
+  ruled out as an HRV source.**
+
+### Field-level schemas (previously undocumented)
+
+`DataType.getAllFields()` returns the real field list per type, so the probe dumps exactly what
+Samsung declares. Samples confirmed from bytecode:
+
+- `HeartRateType`: `HEART_RATE`, `MIN_HEART_RATE`, `MAX_HEART_RATE`, **`SERIES_DATA`**
+  (a `List<entries.HeartRate>`) — **series data is available**, which the published docs never
+  stated. Aggregates: `MIN`, `MAX`.
+- `EnergyScoreType`: `ENERGY_SCORE` (Float).
+- `UserProfileDataType`: `DATE_OF_BIRTH`, `HEIGHT`, `WEIGHT`, `GENDER`, `NICKNAME`.
+
+### Read API (verified signatures)
+
+```kotlin
+val store = HealthDataService.getStore(context)                    // HealthDataStore
+store.getGrantedPermissions(Set<Permission>): Set<Permission>      // suspend
+store.requestPermissions(Set<Permission>, Activity)                // suspend
+store.readData(ReadDataRequest<T>): DataResponse<T>                // suspend
+store.readChanges(ChangedDataRequest<T>): DataResponse<Change<T>>  // suspend
+store.aggregateData(AggregateRequest<T>)                           // suspend
+```
+
+`DataResponse` exposes `dataList: List<T>` and `pageToken: String?` — pagination is manual.
+`HealthDataPoint` carries `uid`, `startTime`, `endTime`, `updateTime`, `zoneOffset`,
+`dataSource` (`appId`, `deviceId`), and typed `getValue(Field<T>)`.
+
+Error codes live in `ErrorCode`: beyond the four documented platform states, the AAR also
+defines `ERR_INVALID_CALLER`, `ERR_INVALID_PLATFORM_SIGNATURE`, `ERR_NO_USER_PERMISSION`,
+`ERR_ACCESS_CONTROL` — the likely signals when developer mode is off.
 
 ## 4. Surface C — Samsung Health Sensor SDK (on-watch)
 

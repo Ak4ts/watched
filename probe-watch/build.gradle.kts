@@ -56,8 +56,14 @@ dependencies {
     implementation(libs.androidx.wear)
     implementation(libs.play.wearable)
 
+    // The Samsung AARs ship as loose files with no POM, so none of their transitive
+    // dependencies are declared. Scanning the bytecode shows exactly three external packages:
+    // kotlinx.parcelize, kotlinx.coroutines (already present) and gson. Without these the SDK
+    // dies at runtime with NoClassDefFoundError, not at compile time.
     if (hasSensorSdk) {
         implementation(files(sensorAar))
+        implementation(libs.kotlin.parcelize.rt)
+        implementation(libs.gson)
     }
 }
 
