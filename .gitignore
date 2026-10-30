@@ -1,0 +1,25 @@
+# Build
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# Samsung SDK AARs — download separately, see README. Not redistributable.
+libs/*.aar
+
+# Device data. NEVER commit: this is personal health data.
+dumps/
+export-raw/
+out/
+*.jsonl
+*.parquet
+
+# Python
+tools/.venv/
+__pycache__/

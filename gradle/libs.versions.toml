@@ -1,0 +1,33 @@
+# Version catalog.
+#
+# NOTE: these versions were chosen offline and have NOT been resolved against the
+# repositories yet. Bump them on the first successful sync; nothing here is load-bearing.
+[versions]
+agp = "8.7.3"
+kotlin = "2.0.21"
+coreKtx = "1.15.0"
+appcompat = "1.7.0"
+coroutines = "1.9.0"
+serialization = "1.7.3"
+healthConnect = "1.1.0-alpha10"
+work = "2.10.0"
+wearable = "18.2.0"
+wear = "1.3.0"
+lifecycle = "2.8.7"
+
+[libraries]
+androidx-core-ktx     = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-appcompat    = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
+androidx-lifecycle    = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }
+kotlinx-coroutines    = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-serialization = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+health-connect        = { module = "androidx.health.connect:connect-client", version.ref = "healthConnect" }
+androidx-work         = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
+play-wearable         = { module = "com.google.android.gms:play-services-wearable", version.ref = "wearable" }
+androidx-wear         = { module = "androidx.wear:wear", version.ref = "wear" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library     = { id = "com.android.library", version.ref = "agp" }
+kotlin-android      = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
