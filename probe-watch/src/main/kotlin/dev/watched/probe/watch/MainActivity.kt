@@ -39,6 +39,8 @@ class MainActivity : AppCompatActivity() {
     private val dumpRoot: File by lazy { File(getExternalFilesDir(null), "dumps") }
     private val sink: JsonlFileSink by lazy { JsonlFileSink(dumpRoot, runId) }
     private val probe: SensorProbe by lazy { SamsungSensorProbe(this, sink, runId) }
+    // Google's API, for contrast: processed data but documented background collection.
+    private val healthServices: HealthServicesProbe by lazy { HealthServicesProbe(this) }
 
     private val collected = mutableListOf<TypeReport>()
 
@@ -79,7 +81,8 @@ class MainActivity : AppCompatActivity() {
         button("5. PPG 60s") { runContinuous("PPG_CONTINUOUS", 60) }
         button("6. All continuous 60s") { runAllContinuous(60) }
         button("7. All on-demand") { runAllOnDemand() }
-        button("8. Write report") { writeReport() }
+        button("8. Health Services inventory") { runHealthServices() }
+        button("9. Write report") { writeReport() }
 
         content.addView(logView)
         scroll = ScrollView(this).apply { addView(content) }
@@ -159,6 +162,11 @@ class MainActivity : AppCompatActivity() {
             collected += probe.measureOnDemand(tracker) { postLog(it) }
         }
         log("--- on-demand sweep done ---")
+    }
+
+    private fun runHealthServices() = lifecycleScope.launch {
+        log("--- Google Health Services ---")
+        collected += healthServices.inventory { postLog(it) }
     }
 
     private fun writeReport() {

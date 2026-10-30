@@ -54,6 +54,16 @@ dependencies {
     implementation(libs.kotlinx.coroutines)
     implementation(libs.kotlinx.serialization)
     implementation(libs.androidx.wear)
+    // Google's Wear OS health API. Unlike Samsung's Sensor SDK it is a plain Gradle
+    // dependency, and it is the documented route to *passive* background collection --
+    // which is the open question the Samsung SDK's docs never answer.
+    implementation(libs.health.services)
+    // Health Services returns ListenableFuture; this supplies it and `await()`.
+    implementation(libs.concurrent.futures)
+    // androidx pulls in guava's EMPTY listenablefuture placeholder
+    // (9999.0-empty-to-avoid-conflict-with-guava), so ListenableFuture has no
+    // class file unless real guava is present. Health Services returns it.
+    implementation(libs.guava)
     implementation(libs.play.wearable)
 
     // The Samsung AARs ship as loose files with no POM, so none of their transitive

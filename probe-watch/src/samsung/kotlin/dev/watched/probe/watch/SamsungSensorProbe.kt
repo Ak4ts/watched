@@ -24,20 +24,14 @@ import kotlin.coroutines.resume
 /**
  * Surface C: Samsung Health Sensor SDK v1.4.1, on-watch.
  *
- * Compiled only when libs/samsung-health-sensor-api.aar is present.
+ * Every signature here was read out of the shipped AAR with `javap`; the SDK's bundled docs/ and
+ * sample-codes/ folders are only HTML redirects to the web.
  *
- * ============================= READ THIS BEFORE EDITING =============================
- * The class and method names below follow the long-standing Samsung Health Sensor SDK shape
- * (HealthTrackingService / ConnectionListener / HealthTracker.TrackerEventListener), but they
- * were NOT transcribed from the API reference -- that reference ships inside the SDK zip, which
- * was not available during research. Open it and confirm before the first run. A wrong guess is
- * a compile error the moment the AAR lands, so nothing here can fail silently.
- *
- * One thing that is deliberate rather than provisional: DataPoint contents are dumped through
- * reflectToJson rather than read via ValueKey constants. We do not yet know which ValueKeys a
- * Watch 7 populates for each tracker -- that is one of the questions -- so the probe reflects
- * the whole object and we read the real shape back out of the dumps.
- * ====================================================================================
+ * The one thing worth knowing: **`SDK_POLICY_ERROR` is a `HealthTracker.TrackerError` enum value,
+ * not a code on `HealthTrackerException`.** The exception only carries `PACKAGE_NOT_INSTALLED`
+ * and `OLD_PLATFORM_VERSION`. So a policy block arrives asynchronously through
+ * `TrackerEventListener.onError`, never as a throw — which means you cannot detect it with a
+ * try/catch and must wait for the callback.
  */
 class SamsungSensorProbe(
     private val context: Context,
@@ -54,11 +48,10 @@ class SamsungSensorProbe(
         else -> "not connected"
     }
 
-    /** Connects, or explains why not. Safe to call repeatedly. */
     private suspend fun connect(log: (String) -> Unit): HealthTrackingService? {
         service?.let { return it }
         return try {
-            withTimeout(CONNECT_TIMEOUT_MS) {
+            val ok = withTimeout(CONNECT_TIMEOUT_MS) {
                 suspendCancellableCoroutine { cont ->
                     val listener = object : ConnectionListener {
                         override fun onConnectionSuccess() {
@@ -79,24 +72,20 @@ class SamsungSensorProbe(
                     val svc = HealthTrackingService(listener, context)
                     service = svc
                     svc.connectService()
-                    cont.invokeOnCancellation { runCatching { svc.disconnectService() } }
                 }
             }
-            if (connectionError == null) service else null
+            if (ok) service else null
         } catch (t: TimeoutCancellationException) {
             connectionError = "timed out after ${CONNECT_TIMEOUT_MS}ms"
             log("sensor service: connect timed out")
             null
         } catch (t: Throwable) {
             connectionError = "${t::class.simpleName}: ${t.message}"
-            log("sensor service: connect threw ${connectionError}")
+            log("sensor service: connect threw $connectionError")
             null
         }
     }
 
-    /**
-     * The gate test. Everything raw depends on this returning [PolicyCheck.Ok].
-     */
     override suspend fun policySmokeTest(log: (String) -> Unit): PolicyCheck {
         log("=== SDK_POLICY_ERROR smoke test ===")
         log("Requires: watch developer mode ON. See docs/access-gates.md section C.")
@@ -106,59 +95,57 @@ class SamsungSensorProbe(
         val tracker = try {
             svc.getHealthTracker(HealthTrackerType.HEART_RATE_CONTINUOUS)
         } catch (e: HealthTrackerException) {
-            return classify(e, log)
+            return PolicyCheck.Failed(describe(e))
         } catch (t: Throwable) {
             return PolicyCheck.Failed("${t::class.simpleName}: ${t.message}")
         }
 
         return try {
-            val first = awaitFirstBatch(tracker, SMOKE_TIMEOUT_MS, log)
-            when {
-                first is BatchResult.Error -> first.exception
-                    ?.let { classify(it, log) }
-                    ?: run {
-                        // No exception object, so we cannot read an error code. A TrackerError
-                        // alone is not proof of a policy block -- say so rather than guess.
-                        log("FAILED without an error code: ${first.detail}")
-                        PolicyCheck.Failed(first.detail)
-                    }
-                first is BatchResult.Data -> {
+            when (val first = awaitFirstBatch(tracker, SMOKE_TIMEOUT_MS, log)) {
+                is BatchResult.Data -> {
                     log("POLICY OK: received ${first.points.size} data point(s) in developer mode")
                     log("Surface C is open. Raw PPG / accelerometer / ECG / IBI are reachable.")
                     PolicyCheck.Ok("HEART_RATE_CONTINUOUS delivered ${first.points.size} points")
                 }
-                else -> PolicyCheck.Failed("no data and no error within ${SMOKE_TIMEOUT_MS}ms")
+
+                is BatchResult.Failed -> when (first.trackerError) {
+                    HealthTracker.TrackerError.SDK_POLICY_ERROR -> {
+                        log("POLICY BLOCKED: SDK_POLICY_ERROR")
+                        log("Developer mode is NOT sufficient. Raw sensors need a Samsung partnership.")
+                        PolicyCheck.PolicyBlocked(first.detail)
+                    }
+
+                    HealthTracker.TrackerError.PERMISSION_ERROR -> {
+                        log("PERMISSION_ERROR — grant BODY_SENSORS and retry. Not a policy block.")
+                        PolicyCheck.Failed(first.detail)
+                    }
+
+                    else -> PolicyCheck.Failed(first.detail)
+                }
+
+                null -> PolicyCheck.Failed("no data and no error within ${SMOKE_TIMEOUT_MS}ms")
             }
         } finally {
             runCatching { tracker.unsetEventListener() }
         }
     }
 
-    private fun classify(e: HealthTrackerException, log: (String) -> Unit): PolicyCheck {
-        val detail = describe(e)
-        return if (e.errorCode == HealthTrackerException.SDK_POLICY_ERROR) {
-            log("POLICY BLOCKED: SDK_POLICY_ERROR — $detail")
-            log("Developer mode is NOT sufficient. Raw sensors need a Samsung partnership.")
-            log("Fall back to Surfaces A + B and re-plan; see docs/access-gates.md open risk 1.")
-            PolicyCheck.PolicyBlocked(detail)
-        } else {
-            log("FAILED (not a policy error): $detail")
-            PolicyCheck.Failed(detail)
-        }
-    }
-
+    /** `hasResolution()`/`resolve()` let the user install or update the Health platform. */
     private fun describe(e: HealthTrackerException): String =
-        "errorCode=${e.errorCode} resolvable=${runCatching { e.isResolvable }.getOrNull()} msg=${e.message}"
+        "errorCode=${e.errorCode} hasResolution=${runCatching { e.hasResolution() }.getOrNull()} msg=${e.message}"
 
     override suspend fun enumerateTrackers(log: (String) -> Unit): List<String> {
         val svc = connect(log) ?: return emptyList()
         return try {
-            val supported = svc.trackingCapability.supportHealthTrackerTypes
-            val names = supported.map { it.name }
+            val capability = svc.trackingCapability
+            val names = capability.supportHealthTrackerTypes.map { it.name }
+            log("platform version: ${runCatching { capability.version }.getOrNull()}")
             log("watch exposes ${names.size} tracker(s):")
             names.sorted().forEach { log("  $it") }
-            (SensorProbe.CONTINUOUS + SensorProbe.ON_DEMAND)
+            HealthTrackerType.values()
+                .map { it.name }
                 .filter { it !in names }
+                .sorted()
                 .forEach { log("  ABSENT: $it") }
             names
         } catch (t: Throwable) {
@@ -172,11 +159,10 @@ class SamsungSensorProbe(
         seconds: Int,
         log: (String) -> Unit,
     ): TypeReport {
-        val svc = connect(log)
-            ?: return failReport(tracker, connectionError ?: "not connected")
+        val svc = connect(log) ?: return failReport(tracker, connectionError ?: "not connected")
 
         val type = HealthTrackerType.values().firstOrNull { it.name == tracker }
-            ?: return failReport(tracker, "no such HealthTrackerType on this device")
+            ?: return failReport(tracker, "no such HealthTrackerType in this SDK")
 
         val batteryBefore = batteryPercent()
         val timestamps = mutableListOf<Long>()
@@ -188,12 +174,16 @@ class SamsungSensorProbe(
             svc.getHealthTracker(type)
         } catch (e: HealthTrackerException) {
             return failReport(tracker, describe(e))
+        } catch (t: Throwable) {
+            return failReport(tracker, "${t::class.simpleName}: ${t.message}")
         }
 
         try {
             healthTracker.setEventListener(object : HealthTracker.TrackerEventListener {
                 override fun onDataReceived(list: MutableList<DataPoint>) {
                     for (point in list) {
+                        // Reflected rather than read through ValueKey constants: which keys a
+                        // Watch 7 populates per tracker is exactly what we are here to find out.
                         val json = reflectToJson(point)
                         sink.write(
                             Envelope(SensorProbe.SURFACE, tracker, runId, System.currentTimeMillis(), json)
@@ -214,6 +204,7 @@ class SamsungSensorProbe(
 
             log("$tracker: streaming for ${seconds}s ...")
             delay(seconds * 1000L)
+            runCatching { healthTracker.flush() }
         } finally {
             runCatching { healthTracker.unsetEventListener() }
         }
@@ -240,14 +231,13 @@ class SamsungSensorProbe(
                 "achievedHz=%.2f".format(achievedHz),
                 "windowSeconds=$seconds",
                 "battery ${batteryBefore}% -> ${batteryAfter}%",
-                // The number that decides the storage and transport design.
                 "projectedBytesPerDay=${if (seconds > 0) bytes * 86400 / seconds else 0}",
             ),
         )
     }
 
     override suspend fun measureOnDemand(tracker: String, log: (String) -> Unit): TypeReport =
-        // On-demand trackers run one at a time, in the foreground, for roughly 30 seconds.
+        // On-demand trackers run one at a time, foreground, for roughly 30 seconds.
         sampleContinuous(tracker, ON_DEMAND_SECONDS, log)
 
     private fun failReport(tracker: String, why: String) = TypeReport(
@@ -264,8 +254,10 @@ class SamsungSensorProbe(
 
     private sealed interface BatchResult {
         data class Data(val points: List<DataPoint>) : BatchResult
-        /** [exception] is null when the failure arrived as a TrackerError rather than a throw. */
-        data class Error(val detail: String, val exception: HealthTrackerException?) : BatchResult
+        data class Failed(
+            val trackerError: HealthTracker.TrackerError?,
+            val detail: String,
+        ) : BatchResult
     }
 
     private suspend fun awaitFirstBatch(
@@ -285,7 +277,7 @@ class SamsungSensorProbe(
                     override fun onError(trackerError: HealthTracker.TrackerError?) {
                         log("smoke test onError: $trackerError")
                         if (cont.isActive) {
-                            cont.resume(BatchResult.Error("TrackerError=$trackerError", null))
+                            cont.resume(BatchResult.Failed(trackerError, "TrackerError=$trackerError"))
                         }
                     }
                 })
@@ -294,7 +286,7 @@ class SamsungSensorProbe(
     } catch (t: TimeoutCancellationException) {
         null
     } catch (e: HealthTrackerException) {
-        BatchResult.Error(describe(e), e)
+        BatchResult.Failed(null, describe(e))
     }
 
     fun disconnect() {
