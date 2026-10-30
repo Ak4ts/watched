@@ -3,6 +3,7 @@ package dev.watched.probe.phone
 import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.HealthConnectFeatures
+import androidx.health.connect.client.feature.ExperimentalFeatureAvailabilityApi
 import androidx.health.connect.client.changes.DeletionChange
 import androidx.health.connect.client.changes.UpsertionChange
 import androidx.health.connect.client.permission.HealthPermission
@@ -22,8 +23,6 @@ import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
 import androidx.health.connect.client.records.HeightRecord
 import androidx.health.connect.client.records.HydrationRecord
-import androidx.health.connect.client.records.InstantaneousRecord
-import androidx.health.connect.client.records.IntervalRecord
 import androidx.health.connect.client.records.LeanBodyMassRecord
 import androidx.health.connect.client.records.NutritionRecord
 import androidx.health.connect.client.records.OxygenSaturationRecord
@@ -48,6 +47,8 @@ import dev.watched.shared.countFieldPresence
 import dev.watched.shared.medianInterval
 import dev.watched.shared.reflectToJson
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import kotlin.reflect.KClass
@@ -128,6 +129,7 @@ class HealthConnectProbe(
         client.permissionController.getGrantedPermissions()
 
     /** Is the background-read feature actually present on this device? Docs disagree; ask it. */
+    @OptIn(ExperimentalFeatureAvailabilityApi::class)
     fun backgroundReadFeatureStatus(): String = try {
         when (client.features.getFeatureStatus(
             HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND
@@ -192,7 +194,7 @@ class HealthConnectProbe(
                     )
                     // Keep a bounded sample in memory for the schema report; the full dump is on disk.
                     if (payloads.size < SCHEMA_SAMPLE) payloads += json
-                    recordTime(record)?.let { timestamps += it }
+                    recordTime(json)?.let { timestamps += it }
                     count++
                 }
                 pageToken = response.pageToken
@@ -225,10 +227,17 @@ class HealthConnectProbe(
         )
     }
 
-    private fun recordTime(record: Record): Long? = when (record) {
-        is InstantaneousRecord -> record.time.toEpochMilli()
-        is IntervalRecord -> record.startTime.toEpochMilli()
-        else -> null
+    /**
+     * Record timestamps come out of the reflected payload rather than the record object.
+     *
+     * Health Connect marks InstantaneousRecord and IntervalRecord `internal`, so there is no
+     * public supertype exposing `time` / `startTime`. reflectToJson has already rendered those
+     * java.time.Instant fields as ISO-8601 strings, so read them back from there.
+     */
+    private fun recordTime(json: JsonElement): Long? {
+        if (json !is JsonObject) return null
+        val raw = (json["time"] ?: json["startTime"]) as? JsonPrimitive ?: return null
+        return runCatching { Instant.parse(raw.content).toEpochMilli() }.getOrNull()
     }
 
     /**

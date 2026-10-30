@@ -26,6 +26,11 @@ internal val probeJson = Json {
     prettyPrint = false
 }
 
+private val reportJson = Json {
+    encodeDefaults = true
+    prettyPrint = true
+}
+
 /**
  * Appends JSON Lines to `<root>/<runId>/<surface>.<type>.jsonl`, one file per type so that a
  * failure in one sweep cannot corrupt another, and so per-type byte counts fall out for free.
@@ -53,7 +58,7 @@ class JsonlFileSink(private val root: File, private val runId: String) : Sink {
 
     override fun writeReport(report: RunReport) {
         File(runDir, "run-report.json")
-            .writeText(Json { prettyPrint = true }.encodeToString(RunReport.serializer(), report))
+            .writeText(reportJson.encodeToString(RunReport.serializer(), report))
     }
 
     override fun close() {
